@@ -43,7 +43,7 @@ import glob
 for iEnergy in Energies:
     i = 0
     for ifile in glob.glob('/eos/experiment/fcc/hh/simulation/samples/v03/singlePart/pim/bFieldOn/eta0.36/'+str(iEnergy)+'GeV/simu/*.root'): 
-        if i > 5: 
+        if i > 10: 
             break
         print ifile
         files.append(ifile)
