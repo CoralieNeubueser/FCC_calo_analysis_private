@@ -1,0 +1,147 @@
+#include "ChiSquareMinimisationPbSpacer.h"
+
+#include "podio/EventStore.h"
+#include "podio/ROOTReader.h"
+
+#include "datamodel/MCParticleCollection.h"
+#include "datamodel/GenVertexCollection.h"
+#include "datamodel/PositionedCaloHitCollection.h"
+
+#include "TVector3.h"
+#include "TMath.h"
+#include "Math/Minimizer.h"
+#include "Math/Factory.h"
+#include "Math/Functor.h"
+#include "TRandom2.h"
+#include "TError.h"
+
+// STL
+#include <vector>
+#include <iostream>
+
+ChiSquareMinimisationPbSpacer::ChiSquareMinimisationPbSpacer(double aEnergy, std::vector<int> aE, std::vector<double> aVecEem, std::vector<double> aVecEhad, std::vector<double> aVecEfirst, std::vector<double> aVecElast):
+  m_energy(aEnergy),
+  m_E(aE),
+  m_vecEem(aVecEem),
+  m_vecEhad(aVecEhad),
+  m_vecEfirst(aVecEfirst),
+  m_vecElast(aVecElast) 
+{
+  Initialize_histos();
+}
+
+ChiSquareMinimisationPbSpacer::~ChiSquareMinimisationPbSpacer() {}
+
+void ChiSquareMinimisationPbSpacer::Initialize_histos()
+{
+
+  h_parameter = new TH1F("h_parameter","", 5, 0,5);
+  m_histograms.push_back(h_parameter);
+
+  h_energyECAL = new TH1F("h_energyECAL","", 100, 0, m_energy);
+  m_histograms.push_back(h_energyECAL);
+
+  h_energyHCAL = new TH1F("h_energyHCAL","", 100, 0, m_energy);
+  m_histograms.push_back(h_energyHCAL);
+
+  h_benchmark = new TH1F("h_benchmark","", 100, m_energy-0.5*m_energy, m_energy+0.5*m_energy);
+  m_histograms.push_back(h_benchmark);
+  
+  h_emScale = new TH1F("h_emScale", "", 100, m_energy-0.5*m_energy, m_energy+0.5*m_energy);
+  m_histograms.push_back(h_emScale);
+
+}
+
+void ChiSquareMinimisationPbSpacer::processEvent(podio::EventStore& aStore, int aEventId, bool aVerbose) {
+  //Get the collections
+  const fcc::MCParticleCollection*  colMCParticles(nullptr);
+  const fcc::PositionedCaloHitCollection*    colECalPositions(nullptr);
+  const fcc::PositionedCaloHitCollection*    colCalPositions(nullptr);
+
+  bool colMCParticlesOK = aStore.get("GenParticles", colMCParticles);
+  bool colECalPositionsOK   = aStore.get("cellECalPositions" , colECalPositions);
+  bool colCalPositionsOK         = aStore.get("cellHCalPositions" , colCalPositions);
+
+  // Energy depsitied in 1st HCAL layer
+  E_firstLayer = 0.;
+  E_lastLayer = 0.;
+  //Total cell energy per event in ECal
+  SumE_cell = 0.;
+  //Total hit energy per event in HCal
+  SumH_cell = 0.;
+
+  m_E.push_back(m_energy);
+
+  int entriesLastEcalLayer=0;
+
+  //PositionedHits collection
+  if (colECalPositionsOK && colCalPositionsOK) {
+    if (aVerbose) {
+      std::cout << " Collections: "          << std::endl;
+      std::cout << " -> #ECalPositions:    " << colECalPositions->size()    << std::endl;
+      std::cout << " -> #HCalPositionedHits:    " << colCalPositions->size()    << std::endl;
+    }
+
+    // loop over ECAL entries)
+    for (auto& iecl=colECalPositions->begin(); iecl!=colECalPositions->end(); ++iecl)
+      {
+	double cellEnergy = iecl->core().energy;
+	SumE_cell += cellEnergy;
+	TVector3 cellPosition(iecl->position().x,iecl->position().y,iecl->position().z);
+	double r = sqrt(pow(iecl->position().x,2)+pow(iecl->position().y,2));
+     	// Add energy in last ECal layer
+	if ( r > (RcaloMax_ecal - layerThickness)){	
+     	  E_lastLayer += cellEnergy;
+	  entriesLastEcalLayer ++;
+	}
+      }
+
+    // loop over HCal entries
+    for (auto& iecl=colCalPositions->begin(); iecl!=colCalPositions->end(); ++iecl)
+      {
+	if (iecl->core().energy > m_thr){
+	  double hitEnergy = iecl->core().energy;
+	  TVector3 hitPosition(iecl->position().x,iecl->position().y,iecl->position().z);
+	  double r = sqrt(pow(iecl->position().x,2)+pow(iecl->position().y,2));
+	  // Add energy in first HCal layer
+	  if ( r < (RcaloMin_hcal + layerThickness)){	
+	    E_firstLayer += hitEnergy*0.029/pion_hcal;
+	  }
+	  SumH_cell += hitEnergy;
+	}
+      } 
+    // Fill vectors
+    m_vecEem.push_back(SumE_cell); //on EM scale
+    m_vecEhad.push_back(SumH_cell*0.029/pion_hcal); //no calibration
+    m_vecEfirst.push_back(E_firstLayer);
+    m_vecElast.push_back(E_lastLayer);
+
+    // Fill histograms
+    h_energyECAL ->Fill(SumE_cell);
+    h_energyHCAL ->Fill(SumH_cell*0.029/pion_hcal);
+
+    if (aVerbose) std::cout << "Total cell energy, ECAL (GeV): " << SumE_cell << " total hit energy, HCAL (GeV): " << SumH_cell*0.029/pion_hcal << std::endl;
+    if (entriesLastEcalLayer==0) std::cout << "Attention!!! no ecal layer entries!!!" << std::endl;
+
+    // Calibration to EM scale
+    h_emScale->Fill(SumE_cell + SumH_cell*0.029/sf_hcal);  
+
+    // Benchmark reconstruction
+    double E0_rec = SumE_cell*a + SumH_cell*0.029/pion_hcal + c*sqrt(abs(E_lastLayer*a*E_firstLayer)) + d*pow(SumE_cell*a,2);
+    h_benchmark ->Fill(E0_rec);
+  }
+  else {
+    if (aVerbose) {
+      std::cout << "No CaloPositionedHits Collection!!!!!" << std::endl;
+    }
+  }
+}
+
+
+void ChiSquareMinimisationPbSpacer::finishLoop(int aNumEvents, bool aVerbose) {
+   
+
+
+}
+
+
